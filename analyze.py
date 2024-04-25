@@ -1,19 +1,18 @@
-import git
-import openpyxl
+from os import listdir, path as os_path, walk as os_walk
+from git import Repo
 from datetime import datetime
-from multiprocessing import Pool, freeze_support
+from openpyxl import Workbook
+import asyncio
+from aiofiles import open as aio_open
 
 
-# 遍历每个项目
-def analyze_repository(args):
-    repo_path, excluded_file_types, start_date, end_date, authors = args
-    repo = git.Repo(repo_path)
-    default_branch = repo.head.reference
-    commits = list(repo.iter_commits(default_branch, since=start_date, until=end_date))
+async def analyze_repo(repo_path, excluded_file_types, start_date, end_date, authors):
+    repo = Repo(repo_path)
+    commits = list(repo.iter_commits("--all", since=start_date, until=end_date))
 
     author_lines = {}
     for commit in commits:
-        if len(commit.parents) > 1:  # 忽略merge操作
+        if len(commit.parents) > 1:
             continue
         if not commit.parents:
             continue
@@ -25,9 +24,8 @@ def analyze_repository(args):
             author_lines[commit_date] = {}
         if author not in author_lines[commit_date]:
             author_lines[commit_date][author] = 0
-        # 获取修改的文件列表
+
         files = commit.stats.files
-        # 计算每次提交的新增行数，排除指定文件类型
         added_lines = 0
         for file in files:
             if not any(file.endswith(file_type) for file_type in excluded_file_types):
@@ -42,16 +40,17 @@ def analyze_repository(args):
     result = []
     for commit_date, authors in author_lines.items():
         for author, line_count in authors.items():
-            result.append([commit_date, repo_path, author, line_count])
+            result.append(
+                [commit_date, repo_path, author, line_count, repo.active_branch.name]
+            )
     return result
 
 
-def analyze_repositories(repositories, start_date, end_date, authors):
-    wb = openpyxl.Workbook()
+async def analyze_repositories(repositories, start_date, end_date, authors):
+    wb = Workbook()
     ws = wb.active
-    ws.append(["日期", "项目", "作者", "新增行数"])
+    ws.append(["日期", "项目", "作者", "新增行数", "分支"])
 
-    # 定义需要排除的文件类型
     excluded_file_types = [
         ".txt",
         ".md",
@@ -64,30 +63,37 @@ def analyze_repositories(repositories, start_date, end_date, authors):
         ".xlsx",
     ]
 
-    # 使用多进程进行并行处理
-    pool = Pool(processes=32)  # 可以根据需要调整进程数
-    args = [
-        (repo, excluded_file_types, start_date, end_date, authors)
+    tasks = [
+        analyze_repo(repo, excluded_file_types, start_date, end_date, authors)
         for repo in repositories
     ]
-    results = pool.map(
-        analyze_repository,
-        args,
-    )
+    results = await asyncio.gather(*tasks)
 
-    for result in results:
-        for row in result:
-            ws.append(row)
+    async with aio_open("new_code_line_statistics_by_day.xlsx", mode="wb") as f:
+        async for result in results:
+            for row in result:
+                await f.write("\t".join(map(str, row)) + "\n")
 
-    wb.save("new_code_line_statistics_by_day.xlsx")
+    wb.save(filename="new_code_line_statistics_by_day.xlsx")
+
+
+def find_git_repositories(person, parent_dir=None):
+    if parent_dir is None:
+        parent_dir = rf"D:\source\gitlab\{person}"
+    repositories = []
+    for dirpath, dirnames, file_ames in os_walk(parent_dir):
+        if ".git" in dirnames:
+            repositories.append(os_path.abspath(dirpath))
+            break
+    return repositories
 
 
 if __name__ == "__main__":
-    # 调用函数并传入项目路径、开始时间和结束时间
-    # 调用函数并传入项目路径、开始时间和结束时间
-    repositories = [r"D:\source\gitlab\td-basic-service"]
+
+    person = "xiupengrong"
+    repositories = find_git_repositories(person)
     start_date = "2024-01-01"
     end_date = "2024-05-01"
-    authors = ["yangyue"]
-    freeze_support()
-    analyze_repositories(repositories, start_date, end_date, authors)
+    authors = [person]
+
+    asyncio.run(analyze_repositories(repositories, start_date, end_date, authors))
